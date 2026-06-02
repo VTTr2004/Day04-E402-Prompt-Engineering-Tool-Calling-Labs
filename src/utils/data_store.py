@@ -143,10 +143,12 @@ class OrderDataStore:
         Return exact product details and a deterministic validation token.
         """
         details: list[dict] = []
+        errors: list[str] = []
         for product_id in product_ids:
             product = self.product_index.get(product_id)
             if not product:
                 details.append({"product_id": product_id, "status": "not_found"})
+                errors.append(f"Unknown product_id: {product_id}.")
                 continue
 
             details.append(
@@ -166,11 +168,14 @@ class OrderDataStore:
             )
 
         found_product_ids = [item["product_id"] for item in details if item.get("status") == "ok"]
-        return {
-            "status": "ok" if found_product_ids else "error",
+        payload = {
+            "status": "error" if errors or not found_product_ids else "ok",
             "detail_token": self.build_detail_token(found_product_ids) if found_product_ids else "",
             "items": details,
         }
+        if errors:
+            payload["errors"] = errors
+        return payload
 
     def get_discount(self, *, seed_hint: str, customer_tier: str = "standard") -> dict:
         """
@@ -267,6 +272,24 @@ class OrderDataStore:
         """
         Recompute totals, persist the final JSON payload, and return its path.
         """
+        missing_fields = [
+            field_name
+            for field_name, value in {
+                "customer_name": customer_name,
+                "customer_phone": customer_phone,
+                "customer_email": customer_email,
+                "shipping_address": shipping_address,
+                "detail_token": detail_token,
+            }.items()
+            if not str(value).strip()
+        ]
+        if missing_fields:
+            return {
+                "status": "error",
+                "errors": [f"Missing required save_order field: {field}." for field in missing_fields],
+            }
+
+        campaign_code = campaign_code.strip() or f"FLASH-{int(discount_rate * 100):02d}"
         normalized_items = self._normalize_order_lines(items)
         pricing_snapshot = self.calculate_order_totals(
             items=normalized_items,
@@ -292,6 +315,7 @@ class OrderDataStore:
         order_id = "ORD-" + hashlib.sha1(seed_payload.encode("utf-8")).hexdigest()[:10].upper()
         relative_path = Path("artifacts") / "orders" / f"{order_id}.json"
         absolute_path = self.output_dir / f"{order_id}.json"
+        relative_path_text = relative_path.as_posix()
 
         payload = {
             "order_id": order_id,
@@ -309,7 +333,7 @@ class OrderDataStore:
                 "campaign_code": campaign_code,
                 "customer_tier": customer_tier.strip().lower() or "standard",
             },
-            "save_path": str(relative_path),
+            "save_path": relative_path_text,
             "source": "llm-order-agent",
         }
         if notes.strip():

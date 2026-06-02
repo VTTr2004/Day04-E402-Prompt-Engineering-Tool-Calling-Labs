@@ -59,18 +59,19 @@ class CalculateTotalsInput(BaseModel):
     )
     detail_token: str = Field(
         ...,
+        min_length=1,
         description="Validation token returned by get_product_details for this product set.",
     )
     discount_rate: float = Field(..., description="Discount rate returned by get_discount. Supported values are 0.1 or 0.2.")
 
 
 class SaveOrderInput(BaseModel):
-    customer_name: str = Field(..., description="Customer full name.")
-    customer_phone: str = Field(..., description="Customer phone number.")
-    customer_email: str = Field(..., description="Customer email address.")
-    shipping_address: str = Field(..., description="Shipping destination in free text.")
+    customer_name: str = Field(..., min_length=1, description="Customer full name copied exactly from the user request.")
+    customer_phone: str = Field(..., min_length=1, description="Customer phone number copied exactly from the user request.")
+    customer_email: str = Field(..., min_length=1, description="Customer email address copied exactly from the user request.")
+    shipping_address: str = Field(..., min_length=1, description="Shipping destination copied exactly from the user request.")
     items: list[OrderLineInput] = Field(..., min_length=1, description="Final product lines with exact IDs and quantities.")
-    detail_token: str = Field(..., description="Validation token returned by get_product_details for this product set.")
+    detail_token: str = Field(..., min_length=1, description="Validation token returned by get_product_details for this product set.")
     discount_rate: float = Field(..., description="Discount rate returned by get_discount.")
     campaign_code: str = Field(..., description="Campaign code returned by get_discount.")
     customer_tier: str = Field(default="standard", description="Customer segment associated with the discount.")
