@@ -7,69 +7,111 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 from core.llm import build_chat_model, normalize_content
-from core.schemas import AgentResult, ToolCallRecord
-from utils.data_store import TravelDataStore
+from core.schemas import (
+    AgentResult,
+    CalculateTotalsInput,
+    DiscountInput,
+    ListProductsInput,
+    ProductDetailInput,
+    SaveOrderInput,
+    ToolCallRecord,
+)
+from utils.data_store import OrderDataStore
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = ROOT_DIR / "data"
+DEFAULT_OUTPUT_DIR = ROOT_DIR / "artifacts" / "orders"
 
 
 def build_system_prompt(today: str | None = None) -> str:
     """
     Student TODO:
-    - Write a system prompt for a TravelBuddy agent.
-    - Keep the lab focused on prompt engineering and tool schema design.
-    - Require this tool order when enough info exists:
-      1. `search_flights`
-      2. `calculate_budget`
-      3. `search_hotels`
-    - Tell the agent to:
-      - refuse illegal or unsafe travel requests
-      - ask a short clarification question when destination/date/budget/nights are missing
-      - use only tool outputs for prices and recommendations
-      - produce one final user-facing answer in Vietnamese
-    - Include `today` so the model can resolve phrases like `cuoi tuan nay`.
+    - Rewrite this prompt for the advanced order-agent lab.
+    - The assistant should manage electronics orders, not travel planning.
+    - Require this tool order whenever the request has enough information:
+      1. `list_products`
+      2. `get_product_details`
+      3. `get_discount`
+      4. `calculate_order_totals`
+      5. `save_order`
+    - Clarify and stop if any of these are missing:
+      - customer name
+      - phone number
+      - email
+      - shipping address
+      - at least one product request with quantity
+    - Refuse fake invoices, manual discount overrides, stock bypass requests, or anything that asks the model
+      to ignore the catalog or policy.
+    - Use only tool outputs for product IDs, prices, stock, discount, totals, and save path.
+    - Return one concise final answer in Vietnamese.
+    - Mention `today` so the model knows the current date for deterministic references if needed.
     """
     raise NotImplementedError("Complete build_system_prompt() in src/agent/graph.py")
 
 
-def build_tools(store: TravelDataStore):
+def build_tools(store: OrderDataStore):
     """
     Student TODO:
-    - Define exactly three tools with strong names, docstrings, and argument schemas:
-      - `search_flights`
-      - `calculate_budget`
-      - `search_hotels`
-    - Return them as a list for `create_agent(...)`.
-    - Each tool should return compact JSON/text that the agent can reuse in its final answer.
+    - Define exactly five tools with strong tool schemas:
+      - `list_products`
+      - `get_product_details`
+      - `get_discount`
+      - `calculate_order_totals`
+      - `save_order`
+    - Use the provided Pydantic schemas from `core.schemas` so the tool arguments stay explicit.
+    - Keep outputs compact and JSON-friendly because the grader will inspect the saved order payload.
+    - `get_product_details` should return a validation token, and later pricing/save tools should require it.
     """
 
-    @tool
-    def search_flights(origin: str, destination: str, departure_date: str, travelers: int = 1) -> str:
-        """Search flights for a route and departure date."""
-        raise NotImplementedError
-
-    @tool
-    def calculate_budget(
-        total_budget: int,
-        nights: int,
-        cheapest_flight_total: int,
-        destination: str,
-        travelers: int = 1,
+    @tool(args_schema=ListProductsInput)
+    def list_products(
+        query: str | None = None,
+        category: str | None = None,
+        max_unit_price: int | None = None,
+        required_tags: list[str] | None = None,
+        in_stock_only: bool = True,
+        limit: int = 8,
     ) -> str:
-        """Calculate the remaining travel budget after flight and local transport costs."""
+        """Search the local product catalog and return the best matching items."""
         raise NotImplementedError
 
-    @tool
-    def search_hotels(city: str, max_price_per_night: int, preferences: list[str] | None = None) -> str:
-        """Search hotels that fit the remaining nightly budget and user preferences."""
+    @tool(args_schema=ProductDetailInput)
+    def get_product_details(product_ids: list[str]) -> str:
+        """Return exact product details for previously discovered product IDs."""
         raise NotImplementedError
 
-    return [search_flights, calculate_budget, search_hotels]
+    @tool(args_schema=DiscountInput)
+    def get_discount(seed_hint: str, customer_tier: str = "standard") -> str:
+        """Return the simulated campaign discount for the order."""
+        raise NotImplementedError
+
+    @tool(args_schema=CalculateTotalsInput)
+    def calculate_order_totals(items, detail_token: str, discount_rate: float) -> str:
+        """Validate stock and calculate the discounted order total."""
+        raise NotImplementedError
+
+    @tool(args_schema=SaveOrderInput)
+    def save_order(
+        customer_name: str,
+        customer_phone: str,
+        customer_email: str,
+        shipping_address: str,
+        items,
+        detail_token: str,
+        discount_rate: float,
+        campaign_code: str,
+        customer_tier: str = "standard",
+        notes: str = "",
+    ) -> str:
+        """Persist the final order to a local JSON file."""
+        raise NotImplementedError
+
+    return [list_products, get_product_details, get_discount, calculate_order_totals, save_order]
 
 
 def build_agent(
     data_dir: Path | None = None,
+    output_dir: Path | None = None,
     *,
     provider: str = "google",
     model_name: str | None = None,
@@ -77,10 +119,10 @@ def build_agent(
 ):
     """
     Student TODO:
-    - Create `TravelDataStore`.
-    - Build the chat model with `build_chat_model(...)`.
-    - Build tools with `build_tools(store)`.
-    - Return `create_agent(model=..., tools=..., system_prompt=...)`.
+    1. Create `OrderDataStore`.
+    2. Build the chat model with `build_chat_model(...)`.
+    3. Build the tools with `build_tools(store)`.
+    4. Return `create_agent(model=..., tools=..., system_prompt=...)`.
     """
     raise NotImplementedError("Complete build_agent() in src/agent/graph.py")
 
@@ -91,25 +133,32 @@ def run_agent(
     provider: str = "google",
     model_name: str | None = None,
     data_dir: Path | None = None,
+    output_dir: Path | None = None,
     today: str | None = None,
 ) -> AgentResult:
     """
     Student TODO:
-    - Build the agent with `build_agent(...)`.
+    - Build the agent.
     - Invoke it with one user message.
     - Extract:
       - the final AI answer
-      - the tool call trace from `messages`
+      - the tool trace
+      - the saved order payload, if any
     - Return an `AgentResult`.
     """
     raise NotImplementedError("Complete run_agent() in src/agent/graph.py")
 
 
 def extract_final_answer(messages) -> str:
-    """Optional helper: return the last AI message text."""
+    """Optional helper: return the last non-empty AI answer."""
     raise NotImplementedError
 
 
 def extract_tool_calls(messages) -> list[ToolCallRecord]:
-    """Optional helper: convert tool messages into a simple grading trace."""
+    """Optional helper: convert tool calls and tool results into a simple grading trace."""
+    raise NotImplementedError
+
+
+def extract_saved_order(tool_calls: list[ToolCallRecord]) -> tuple[dict | None, str | None]:
+    """Optional helper: parse the `save_order` tool output into `(saved_order, path)`."""
     raise NotImplementedError

@@ -3,20 +3,17 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-SRC_DIR = ROOT_DIR / "src"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
-from core.llm import judge_answer_with_llm
-from core.schemas import AgentResult, ToolCallRecord
+from src.core.llm import judge_answer_with_llm
 
 
 @dataclass
@@ -31,18 +28,147 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def coerce_result(raw: Any, *, query: str, provider: str, model_name: str | None) -> AgentResult:
-    if isinstance(raw, AgentResult):
-        return raw
+def normalize_text(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    stripped = stripped.replace("đ", "d").replace("Đ", "D")
+    return " ".join(stripped.lower().split())
+
+
+def coerce_result(raw: Any, *, query: str, provider: str, model_name: str | None) -> dict[str, Any]:
     if isinstance(raw, str):
-        return AgentResult(query=query, final_answer=raw, provider=provider, model_name=model_name)
+        return {
+            "query": query,
+            "final_answer": raw,
+            "tool_calls": [],
+            "provider": provider,
+            "model_name": model_name,
+            "saved_order": None,
+            "saved_order_path": None,
+        }
     if isinstance(raw, dict):
-        return AgentResult(**raw)
-    raise TypeError(f"Unsupported run_agent result type: {type(raw)!r}")
+        payload = dict(raw)
+    elif hasattr(raw, "model_dump"):
+        payload = raw.model_dump()
+    elif hasattr(raw, "__dict__"):
+        payload = dict(raw.__dict__)
+    else:
+        raise TypeError(f"Unsupported run_agent result type: {type(raw)!r}")
+
+    payload.setdefault("query", query)
+    payload.setdefault("final_answer", "")
+    payload.setdefault("tool_calls", [])
+    payload.setdefault("provider", provider)
+    payload.setdefault("model_name", model_name)
+    payload.setdefault("saved_order", None)
+    payload.setdefault("saved_order_path", None)
+    return payload
+
+
+def load_expected_order(relative_path: str) -> dict[str, Any]:
+    return json.loads((ROOT_DIR / relative_path).read_text(encoding="utf-8"))
+
+
+def compare_values(expected: Any, actual: Any, *, path: str = "root") -> list[str]:
+    errors: list[str] = []
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return [f"{path}: expected object, got {type(actual).__name__}."]
+        for key, value in expected.items():
+            if key not in actual:
+                errors.append(f"{path}.{key}: missing key.")
+                continue
+            errors.extend(compare_values(value, actual[key], path=f"{path}.{key}"))
+        return errors
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return [f"{path}: expected list, got {type(actual).__name__}."]
+        if len(expected) != len(actual):
+            errors.append(f"{path}: expected {len(expected)} items, got {len(actual)}.")
+            return errors
+
+        if expected and isinstance(expected[0], dict) and "product_id" in expected[0]:
+            expected = sorted(expected, key=lambda item: item["product_id"])
+            actual = sorted(actual, key=lambda item: item.get("product_id", ""))
+
+        for index, (expected_item, actual_item) in enumerate(zip(expected, actual)):
+            errors.extend(compare_values(expected_item, actual_item, path=f"{path}[{index}]"))
+        return errors
+
+    if isinstance(expected, float):
+        actual_value = float(actual)
+        if abs(expected - actual_value) > 1e-9:
+            errors.append(f"{path}: expected {expected}, got {actual_value}.")
+        return errors
+
+    if expected != actual:
+        errors.append(f"{path}: expected {expected!r}, got {actual!r}.")
+    return errors
+
+
+def is_subsequence(required_tools: list[str], actual_tools: list[str]) -> bool:
+    if not required_tools:
+        return not actual_tools if actual_tools else True
+    index = 0
+    for tool_name in actual_tools:
+        if tool_name == required_tools[index]:
+            index += 1
+            if index == len(required_tools):
+                return True
+    return False
+
+
+def score_tools(actual_tools: list[str], required_tools: list[str], weight: float) -> tuple[float, list[str]]:
+    if weight == 0:
+        return 0.0, []
+    if is_subsequence(required_tools, actual_tools):
+        return weight, []
+    return 0.0, [f"Tool trace mismatch. Expected subsequence {required_tools}, got {actual_tools}."]
+
+
+def score_json_output(result: dict[str, Any], case: dict[str, Any], weight: float) -> tuple[float, list[str]]:
+    if weight == 0:
+        return 0.0, []
+
+    expected = case["expected"]
+    saved_order = result.get("saved_order")
+    saved_order_path = result.get("saved_order_path")
+    feedback: list[str] = []
+
+    if not expected.get("expect_saved_order", False):
+        if saved_order is None and not saved_order_path:
+            return weight, []
+        feedback.append("Order should not have been saved for this case.")
+        return 0.0, feedback
+
+    if saved_order is None:
+        return 0.0, ["Missing saved_order payload."]
+    if not saved_order_path:
+        feedback.append("Missing saved_order_path in AgentResult.")
+
+    expected_payload = load_expected_order(expected["expected_order_file"])
+    compare_errors = compare_values(expected_payload, saved_order)
+    if compare_errors:
+        feedback.extend(compare_errors)
+        return 0.0, feedback
+
+    if saved_order_path:
+        saved_path = Path(saved_order_path)
+        if not saved_path.exists():
+            feedback.append(f"Saved order file does not exist: {saved_order_path}.")
+            return 0.0, feedback
+        file_payload = json.loads(saved_path.read_text(encoding="utf-8"))
+        file_errors = compare_values(expected_payload, file_payload, path="file")
+        if file_errors:
+            feedback.extend(file_errors)
+            return 0.0, feedback
+
+    return weight, feedback
 
 
 def grade_result(
-    result: AgentResult,
+    result: dict[str, Any],
     case: dict[str, Any],
     *,
     judge_provider: str | None = None,
@@ -50,48 +176,31 @@ def grade_result(
 ) -> CaseScore:
     expected = case["expected"]
     weights = case["weights"]
-    earned = 0.0
     feedback: list[str] = []
-    answer = result.final_answer.lower()
+    earned = 0.0
 
-    required_keywords = [item.lower() for item in expected.get("required_keywords", [])]
-    keyword_hits = sum(1 for keyword in required_keywords if keyword in answer)
-    if required_keywords:
-        keyword_score = weights["keywords"] * (keyword_hits / len(required_keywords))
-        earned += keyword_score
-        if keyword_hits < len(required_keywords):
-            missing = [keyword for keyword in required_keywords if keyword not in answer]
-            feedback.append(f"Missing required keywords: {missing}.")
-    else:
-        earned += weights["keywords"]
+    json_score, json_feedback = score_json_output(result, case, weights.get("json_output", 0))
+    tool_score, tool_feedback = score_tools(
+        [tool["name"] if isinstance(tool, dict) else tool.name for tool in result.get("tool_calls", [])],
+        expected.get("required_tools", []),
+        weights.get("tools", 0),
+    )
 
-    forbidden_keywords = [item.lower() for item in expected.get("forbidden_keywords", [])]
-    violations = [keyword for keyword in forbidden_keywords if keyword in answer]
-    if not violations:
-        earned += weights["safety"]
-    else:
-        feedback.append(f"Answer contains forbidden keywords: {violations}.")
+    earned += json_score + tool_score
+    feedback.extend(json_feedback)
+    feedback.extend(tool_feedback)
 
-    required_tools = expected.get("required_tools", [])
-    tool_names = [tool.name for tool in result.tool_calls]
-    if all(tool in tool_names for tool in required_tools):
-        earned += weights["tools"]
-    else:
-        missing_tools = [tool for tool in required_tools if tool not in tool_names]
-        feedback.append(f"Missing required tools: {missing_tools}.")
-
-    if judge_provider:
+    judge_weight = weights.get("llm_judge", 0)
+    if judge_weight and judge_provider:
         judge = judge_answer_with_llm(
-            query=result.query,
-            answer=result.final_answer,
+            query=result["query"],
+            answer=result.get("final_answer", ""),
             rubric=expected.get("grading_rubric", ""),
             provider=judge_provider,
             model_name=judge_model_name,
         )
-        earned += weights["llm_judge"] * (judge["score"] / 10)
+        earned += judge_weight * (judge["score"] / 10)
         feedback.extend(judge["feedback"])
-    else:
-        earned += weights["llm_judge"]
 
     return CaseScore(
         case_id=case["id"],
@@ -122,12 +231,12 @@ def summarize_scores(scores: list[CaseScore]) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Grade final answers for the TravelBuddy create_agent lab")
-    parser.add_argument("--module", default="agent.graph")
+    parser = argparse.ArgumentParser(description="Grade saved JSON output for the order-agent lab")
+    parser.add_argument("--module", default="solution.agent.graph")
     parser.add_argument("--cases", default=str(ROOT_DIR / "data" / "graded_cases.json"))
     parser.add_argument("--provider", default="google", choices=["google", "ollama"])
     parser.add_argument("--model-name", default=None)
-    parser.add_argument("--today", default="2026-05-31")
+    parser.add_argument("--today", default="2026-06-01")
     parser.add_argument("--pass-threshold", type=float, default=80.0)
     parser.add_argument("--judge-provider", default=None, choices=["google", "ollama"])
     parser.add_argument("--judge-model-name", default=None)
@@ -138,7 +247,7 @@ def main() -> int:
         raise SystemExit(f"Module {args.module} does not expose run_agent()")
 
     cases = load_cases(Path(args.cases))
-    scores = []
+    scores: list[CaseScore] = []
     for case in cases:
         raw_result = module.run_agent(
             case["query"],

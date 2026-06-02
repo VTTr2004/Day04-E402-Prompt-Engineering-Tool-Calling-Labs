@@ -36,7 +36,7 @@ def build_chat_model(
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         return ChatGoogleGenerativeAI(
-            model=model_name or os.getenv("TRAVEL_AGENT_MODEL", "gemini-2.5-flash-lite"),
+            model=model_name or os.getenv("LLM_MODEL", "gemini-2.5-flash"),
             temperature=temperature,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
         )
@@ -44,11 +44,11 @@ def build_chat_model(
         from langchain_ollama import ChatOllama
 
         return ChatOllama(
-            model=model_name or os.getenv("OLLAMA_MODEL", "qwen3.5:0.8b"),
+            model=model_name or os.getenv("OLLAMA_MODEL", "qwen3.5:3b"),
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=temperature,
         )
-    raise ValueError("This simplified lab supports `google` and `ollama` providers only.")
+    raise ValueError("This lab supports only the `google` and `ollama` providers.")
 
 
 def extract_json_object(raw: Any) -> dict[str, Any]:
@@ -60,7 +60,7 @@ def extract_json_object(raw: Any) -> dict[str, Any]:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1:
-        raise ValueError("No JSON object found in model output")
+        raise ValueError("No JSON object found in model output.")
     return json.loads(text[start : end + 1])
 
 
@@ -74,7 +74,7 @@ def judge_answer_with_llm(
 ) -> dict[str, Any]:
     model = build_chat_model(provider=provider, model_name=model_name, temperature=0.0)
     prompt = f"""
-You are grading a student travel-agent answer.
+You are grading a student order-agent answer.
 Return JSON only with:
 - score: integer from 0 to 10
 - verdict: short string

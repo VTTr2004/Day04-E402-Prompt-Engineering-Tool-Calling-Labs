@@ -1,2 +1,1 @@
-"""Shared helpers for the Day 4 TravelBuddy lab."""
-
+"""Shared schema and LLM helpers for the advanced order-agent lab."""

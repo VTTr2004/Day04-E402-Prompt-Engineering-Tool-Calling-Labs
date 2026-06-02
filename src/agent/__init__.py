@@ -1,2 +1,1 @@
-"""Student starter package."""
-
+"""Student starter package for the order-agent lab."""

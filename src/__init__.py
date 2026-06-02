@@ -1,2 +1,1 @@
-"""Starter package for students."""
-
+"""Student scaffold for the advanced order-agent lab."""
