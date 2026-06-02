@@ -11,6 +11,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from src.core.prompting import render_prompt
+
 load_dotenv()
 
 
@@ -289,22 +291,12 @@ def judge_answer_with_llm(
     model_name: str | None = None,
 ) -> dict[str, Any]:
     model = build_chat_model(provider=provider, model_name=model_name, temperature=0.0)
-    prompt = f"""
-You are grading a student order-agent answer.
-Return JSON only with:
-- score: integer from 0 to 10
-- verdict: short string
-- feedback: short list of strings
-
-Rubric:
-{rubric}
-
-User query:
-{query}
-
-Student answer:
-{answer}
-""".strip()
+    prompt = render_prompt(
+        "judge_answer.md",
+        rubric=rubric,
+        query=query,
+        answer=answer,
+    )
     payload = extract_json_object(model.invoke(prompt).content)
     score = max(0, min(10, int(payload.get("score", 0))))
     return {
